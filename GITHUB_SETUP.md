@@ -13,7 +13,7 @@ Este guia mostra como conectar seu projeto atual ao GitHub e fazer o primeiro up
 2. Clique no botão **"New"** ou **"+"** no canto superior direito
 3. Selecione **"New repository"**
 4. Configure o repositório:
-   - **Repository name**: `sistema-gestao-clinicas` (ou o nome que preferir)
+   - **Repository name**: `taskmed` (ou o nome que preferir)
    - **Description**: `Sistema completo de gestão para clínicas médicas com agendamento inteligente`
    - **Visibility**: Escolha **Private** (recomendado) ou **Public**
    - **NÃO marque** "Add a README file" (já temos um)
