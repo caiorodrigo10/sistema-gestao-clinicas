@@ -1,4 +1,4 @@
-# Sistema de Gestão de Clínicas
+# TaskMed
 
 Sistema completo de gestão para clínicas médicas e psicológicas com agendamento inteligente, prontuários eletrônicos e integração com Google Calendar.
 
