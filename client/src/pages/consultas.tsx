@@ -16,7 +16,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem } from "@/components/ui/command";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Calendar, List, Clock, User, Stethoscope, CalendarDays, ChevronLeft, ChevronRight, Phone, MessageCircle, MapPin, Plus, Check, ChevronsUpDown, Edit, Trash2, X, Eye, MoreVertical, AlertTriangle, Search, Mail, CheckCircle } from "lucide-react";
+import { Calendar, List, Clock, User, Stethoscope, CalendarDays, ChevronLeft, ChevronRight, Phone, MessageCircle, MapPin, Plus, Check, ChevronsUpDown, Edit, Trash2, X, Eye, MoreVertical, AlertTriangle, Search, Mail, CheckCircle, FileText } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { useAvailabilityCheck, formatConflictMessage, createTimeSlots } from "@/hooks/useAvailability";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -26,11 +27,12 @@ import { ptBR } from "date-fns/locale";
 import { EventTooltip } from "@/components/EventTooltip";
 import { AppointmentEditor } from "@/components/AppointmentEditor";
 import { FindTimeSlots } from "@/components/FindTimeSlots";
-import type { Appointment, Contact } from "@/../../shared/schema";
+import { AppointmentTagSelector } from "@/components/AppointmentTagSelector";
+import type { Appointment } from "../../../server/domains/appointments/appointments.schema";
+import type { Contact } from "../../../server/domains/contacts/contacts.schema";
 
 // Schema for appointment creation form
 const appointmentSchema = z.object({
-  appointment_name: z.string().min(1, "Nome do compromisso é obrigatório"),
   contact_id: z.string().min(1, "Contato é obrigatório"),
   user_id: z.string().min(1, "Profissional é obrigatório"),
   scheduled_date: z.string().min(1, "Data é obrigatória"),
@@ -38,8 +40,6 @@ const appointmentSchema = z.object({
   duration: z.string().min(1, "Duração é obrigatória"),
   type: z.string().min(1, "Tipo é obrigatório"),
   notes: z.string().optional(),
-  contact_whatsapp: z.string().optional(),
-  contact_email: z.string().optional(),
 });
 
 type AppointmentForm = z.infer<typeof appointmentSchema>;
@@ -165,6 +165,7 @@ export function Consultas() {
   const [viewMode, setViewMode] = useState<"list" | "calendar">("list");
   const [calendarView, setCalendarView] = useState<"month" | "week" | "day">("week");
   const [currentDate, setCurrentDate] = useState(new Date());
+  const [selectedProfessionals, setSelectedProfessionals] = useState<number[]>([]);
   
   // Create a stable reference for "today" to avoid timezone issues
   const today = useMemo(() => {
@@ -187,6 +188,7 @@ export function Consultas() {
     message: string;
     conflictType?: string;
   } | null>(null);
+  const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
   const [workingHoursWarning, setWorkingHoursWarning] = useState<{
     hasWarning: boolean;
     message: string;
@@ -217,14 +219,25 @@ export function Consultas() {
     y: 0
   });
   
+  // Add missing selectedTagId state
+  const [selectedTagId, setSelectedTagId] = useState<number | null>(null);
+  
+  // Initialize selectedTagId if not defined for backward compatibility
+  useEffect(() => {
+    if (typeof selectedTagId === 'undefined') {
+      setSelectedTagId(null);
+    }
+  }, []);
+  
   const { toast } = useToast();
   const availabilityCheck = useAvailabilityCheck();
+
+
 
   // Form for creating appointments
   const form = useForm<AppointmentForm>({
     resolver: zodResolver(appointmentSchema),
     defaultValues: {
-      appointment_name: "",
       contact_id: "",
       user_id: "",
       scheduled_date: "",
@@ -232,8 +245,6 @@ export function Consultas() {
       duration: "30",
       type: "consulta",
       notes: "",
-      contact_whatsapp: "",
-      contact_email: "",
     },
   });
 
@@ -337,8 +348,6 @@ export function Consultas() {
         console.log('🎯 Auto-selecting newly created patient...');
         if (newPatient && newPatient.id) {
           form.setValue("contact_id", newPatient.id.toString());
-          form.setValue("contact_whatsapp", newPatient.phone || "");
-          form.setValue("contact_email", newPatient.email || "");
           console.log('✅ Patient auto-selected with ID:', newPatient.id);
         } else {
           console.warn('⚠️ Unable to auto-select patient - no ID received, will attempt fallback');
@@ -359,8 +368,6 @@ export function Consultas() {
                 
                 if (newlyCreated) {
                   form.setValue("contact_id", newlyCreated.id.toString());
-                  form.setValue("contact_whatsapp", newlyCreated.phone || "");
-                  form.setValue("contact_email", newlyCreated.email || "");
                   console.log('✅ Fallback patient selection successful with ID:', newlyCreated.id);
                 } else {
                   console.warn('⚠️ Fallback patient selection failed - patient not found in contacts list');
@@ -432,22 +439,15 @@ export function Consultas() {
   // Create appointment mutation
   const createAppointmentMutation = useMutation({
     mutationFn: async (data: AppointmentForm) => {
-      // Update contact data if modified
-      if (data.contact_whatsapp || data.contact_email) {
-        const contactUpdates: any = {};
-        if (data.contact_whatsapp) contactUpdates.phone = data.contact_whatsapp;
-        if (data.contact_email) contactUpdates.email = data.contact_email;
-        
-        if (Object.keys(contactUpdates).length > 0) {
-          await apiRequest("PUT", `/api/contacts/${data.contact_id}`, contactUpdates);
-        }
-      }
-
+      // Get the selected contact to use patient name
+      const selectedContact = contacts.find((contact: Contact) => contact.id.toString() === data.contact_id);
+      const patientName = selectedContact?.name || "Paciente";
+      
       const appointmentData = {
         contact_id: parseInt(data.contact_id),
         user_id: parseInt(data.user_id),
         clinic_id: 1,
-        doctor_name: data.appointment_name,
+        doctor_name: patientName,
         specialty: data.type,
         appointment_type: data.type,
         scheduled_date: new Date(`${data.scheduled_date}T${data.scheduled_time}`),
@@ -455,7 +455,7 @@ export function Consultas() {
         status: "agendada",
         payment_status: "pendente",
         payment_amount: 0,
-        session_notes: data.notes || null,
+        session_notes: data.notes || null
       };
       const res = await apiRequest("POST", "/api/appointments", appointmentData);
       return await res.json();
@@ -480,7 +480,7 @@ export function Consultas() {
     },
   });
 
-  // Fetch appointments
+  // Fetch appointments with optimized caching
   const { data: appointments = [], isLoading: appointmentsLoading } = useQuery({
     queryKey: ['/api/appointments', { clinic_id: 1 }],
     queryFn: async () => {
@@ -488,9 +488,12 @@ export function Consultas() {
       if (!response.ok) throw new Error('Failed to fetch appointments');
       return response.json();
     },
+    staleTime: 30 * 1000, // 30 seconds
+    gcTime: 5 * 60 * 1000, // 5 minutes
+    refetchOnWindowFocus: false,
   });
 
-  // Fetch contacts for patient names
+  // Fetch contacts with optimized caching
   const { data: contacts = [] } = useQuery({
     queryKey: ['/api/contacts', { clinic_id: 1 }],
     queryFn: async () => {
@@ -498,17 +501,71 @@ export function Consultas() {
       if (!response.ok) throw new Error('Failed to fetch contacts');
       return response.json();
     },
+    staleTime: 2 * 60 * 1000, // 2 minutes
+    gcTime: 10 * 60 * 1000, // 10 minutes
+    refetchOnWindowFocus: false,
   });
 
-  // Fetch users for doctor names
+  // Fetch users with optimized caching
   const { data: clinicUsers = [] } = useQuery({
-    queryKey: ['/api/clinic/1/users'],
+    queryKey: ['/api/clinic/1/users/management'],
     queryFn: async () => {
-      const response = await fetch('/api/clinic/1/users');
+      const response = await fetch('/api/clinic/1/users/management');
       if (!response.ok) throw new Error('Failed to fetch clinic users');
       return response.json();
     },
+    staleTime: 5 * 60 * 1000, // 5 minutes
+    gcTime: 15 * 60 * 1000, // 15 minutes
+    refetchOnWindowFocus: false,
   });
+
+  // Memoized current user email for performance
+  const currentUserEmail = useMemo(() => {
+    try {
+      const authData = JSON.parse(localStorage.getItem('sb-lkwrevhxugaxfpwiktdy-auth-token') || '{}');
+      return authData?.user?.email || null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  // Memoized clinic user lookup by email
+  const clinicUserByEmail = useMemo(() => {
+    const map = new Map<string, any>();
+    clinicUsers.forEach((user: any) => {
+      if (user.email) {
+        map.set(user.email, user);
+      }
+    });
+    return map;
+  }, [clinicUsers]);
+
+  // Pre-select current user when clinicUsers data loads - optimized version
+  React.useEffect(() => {
+    if (clinicUsers.length > 0 && selectedProfessionals.length === 0 && currentUserEmail) {
+      const currentClinicUser = clinicUserByEmail.get(currentUserEmail);
+      if (currentClinicUser && currentClinicUser.is_professional) {
+        setSelectedProfessionals([currentClinicUser.id]);
+      }
+    }
+  }, [clinicUsers.length, selectedProfessionals.length, currentUserEmail, clinicUserByEmail]);
+
+  // Memoized professional ID lookup for performance
+  const professionalNameToIdMap = useMemo(() => {
+    const map = new Map<string, number>();
+    clinicUsers.forEach((user: any) => {
+      if (user.name) {
+        map.set(user.name, user.id);
+      }
+    });
+    return map;
+  }, [clinicUsers]);
+
+  // Optimized helper function to get professional ID by name
+  const getProfessionalIdByName = React.useCallback((doctorName: string | null | undefined) => {
+    if (!doctorName) return null;
+    return professionalNameToIdMap.get(doctorName) || null;
+  }, [professionalNameToIdMap]);
 
   // Fetch clinic configuration for working hours validation
   const { data: clinicConfig } = useQuery({
@@ -518,6 +575,9 @@ export function Consultas() {
       if (!response.ok) throw new Error('Failed to fetch clinic config');
       return response.json();
     },
+    staleTime: 10 * 60 * 1000, // 10 minutes
+    gcTime: 30 * 60 * 1000, // 30 minutes
+    refetchOnWindowFocus: false,
     select: (data: any) => ({
       working_days: data.working_days || ['monday','tuesday','wednesday','thursday','friday'],
       work_start: data.work_start || "08:00",
@@ -554,7 +614,7 @@ export function Consultas() {
     return time >= config.lunch_start && time < config.lunch_end;
   };
 
-  const checkWorkingHours = (date: string, time: string) => {
+  const checkWorkingHours = React.useCallback((date: string, time: string) => {
     if (!date || !time || !clinicConfig) {
       setWorkingHoursWarning(null);
       return;
@@ -608,7 +668,7 @@ export function Consultas() {
 
     // Clear warnings for normal working hours
     setWorkingHoursWarning(null);
-  };
+  }, [clinicConfig]);
 
   // Helper functions for calendar background colors
   const isUnavailableDay = (date: Date): boolean => {
@@ -721,12 +781,14 @@ export function Consultas() {
   };
 
   // Function to check availability when date/time changes
-  const checkAvailability = async (date: string, time: string, duration: string) => {
+  const checkAvailability = React.useCallback(async (date: string, time: string, duration: string, professionalName?: string) => {
     if (!date || !time || !duration) {
       setAvailabilityConflict(null);
+      setIsCheckingAvailability(false);
       return;
     }
 
+    setIsCheckingAvailability(true);
     const startDateTime = new Date(`${date}T${time}`);
     const durationMinutes = parseInt(duration);
     const endDateTime = new Date(startDateTime.getTime() + durationMinutes * 60000);
@@ -734,7 +796,8 @@ export function Consultas() {
     try {
       const result = await availabilityCheck.mutateAsync({
         startDateTime: startDateTime.toISOString(),
-        endDateTime: endDateTime.toISOString()
+        endDateTime: endDateTime.toISOString(),
+        professionalName: professionalName
       });
 
       if (result.conflict) {
@@ -753,11 +816,13 @@ export function Consultas() {
     } catch (error) {
       console.error('Erro ao verificar disponibilidade:', error);
       setAvailabilityConflict(null);
+    } finally {
+      setIsCheckingAvailability(false);
     }
-  };
+  }, [availabilityCheck]);
 
   // Find available time slots
-  const findAvailableSlots = async (date: string, duration: string) => {
+  const findAvailableSlots = React.useCallback(async (date: string, duration: string, professionalName?: string) => {
     if (!date || !duration) return;
 
     const selectedDate = new Date(date);
@@ -772,7 +837,8 @@ export function Consultas() {
 
         const result = await availabilityCheck.mutateAsync({
           startDateTime: startDateTime.toISOString(),
-          endDateTime: endDateTime.toISOString()
+          endDateTime: endDateTime.toISOString(),
+          professionalName: professionalName
         });
 
         if (!result.conflict) {
@@ -790,23 +856,60 @@ export function Consultas() {
     }
 
     setSuggestedSlots(availableSlots);
-  };
+  }, [availabilityCheck]);
 
   // Watch form fields for availability checking
   const watchedDate = form.watch("scheduled_date");
   const watchedTime = form.watch("scheduled_time");
   const watchedDuration = form.watch("duration");
+  const watchedProfessionalId = form.watch("user_id");
 
+  // Helper function to get professional name by ID
+  const getProfessionalNameById = React.useCallback((userId: string | number) => {
+    if (!userId) return null;
+    const user = clinicUsers.find((u: any) => (u.id || u.user_id)?.toString() === userId.toString());
+    return user?.name || null;
+  }, [clinicUsers]);
+
+  // Separate effect for professional selection - immediate response
   useEffect(() => {
+    const professionalName = getProfessionalNameById(watchedProfessionalId);
+    
+    if (!watchedProfessionalId || !professionalName) {
+      setAvailabilityConflict({
+        hasConflict: true,
+        message: "Selecione um profissional antes de verificar disponibilidade",
+        conflictType: "no_professional"
+      });
+      setSuggestedSlots([]);
+    } else {
+      // Professional selected - clear the warning immediately
+      if (availabilityConflict?.conflictType === "no_professional") {
+        setAvailabilityConflict(null);
+      }
+    }
+  }, [watchedProfessionalId]);
+
+  // Separate effect for date/time changes - with debounce
+  useEffect(() => {
+    if (!watchedProfessionalId) return;
+    
+    const professionalName = getProfessionalNameById(watchedProfessionalId);
+    if (!professionalName) return;
+
     const timeoutId = setTimeout(() => {
       if (watchedDate && watchedTime && watchedDuration) {
-        checkAvailability(watchedDate, watchedTime, watchedDuration);
+        checkAvailability(watchedDate, watchedTime, watchedDuration, professionalName);
         checkWorkingHours(watchedDate, watchedTime);
       }
-    }, 500); // Debounce
+      
+      if (watchedDate && watchedDuration && !watchedTime) {
+        findAvailableSlots(watchedDate, watchedDuration, professionalName);
+      }
+    }, 500);
 
     return () => clearTimeout(timeoutId);
-  }, [watchedDate, watchedTime, watchedDuration]);
+  }, [watchedDate, watchedTime, watchedDuration, watchedProfessionalId]);
 
   useEffect(() => {
     if (!appointmentsLoading) {
@@ -844,8 +947,160 @@ export function Consultas() {
 
   // Get appointment duration in minutes
   const getAppointmentDuration = (appointment: Appointment): number => {
-    return appointment.duration_minutes || 60; // Default to 60 minutes if not specified
+    // Debug logging for Sales event specifically
+    if (appointment.doctor_name === 'Sales' || appointment.id?.toString().includes('Sales')) {
+      console.log('🔍 Sales event duration debug:', {
+        id: appointment.id,
+        doctor_name: appointment.doctor_name,
+        duration_minutes: appointment.duration_minutes,
+        type: typeof appointment.duration_minutes,
+        isGoogleEvent: !!appointment.google_calendar_event_id,
+        fullAppointment: appointment
+      });
+    }
+    
+    const duration = appointment.duration_minutes || 60;
+    
+    // Additional debug for unexpected durations
+    if (duration === 15 && appointment.doctor_name === 'Sales') {
+      console.warn('⚠️ Sales event showing 15 minutes - this is incorrect!', {
+        originalDuration: appointment.duration_minutes,
+        calculatedDuration: duration
+      });
+    }
+    
+    return duration;
   };
+
+  // Memoized collision detection cache for performance optimization
+  const collisionCache = useMemo(() => new Map<string, boolean>(), [appointments]);
+
+  // Optimized collision detection with caching for better performance
+  const checkEventsOverlap = React.useCallback((event1: Appointment, event2: Appointment): boolean => {
+    if (!event1.scheduled_date || !event2.scheduled_date) return false;
+    
+    // Use cache key based on appointment IDs to avoid duplicate calculations
+    const cacheKey = `${Math.min(event1.id, event2.id)}-${Math.max(event1.id, event2.id)}`;
+    
+    if (collisionCache.has(cacheKey)) {
+      return collisionCache.get(cacheKey)!;
+    }
+    
+    const start1 = new Date(event1.scheduled_date).getTime();
+    const end1 = start1 + (getAppointmentDuration(event1) * 60 * 1000);
+    const start2 = new Date(event2.scheduled_date).getTime();
+    const end2 = start2 + (getAppointmentDuration(event2) * 60 * 1000);
+    
+    const overlaps = start1 < end2 && start2 < end1;
+    
+    // Cache the result to avoid recalculation
+    collisionCache.set(cacheKey, overlaps);
+    
+    return overlaps;
+  }, [getAppointmentDuration, collisionCache]);
+
+  // Memoized layout cache for performance optimization
+  const layoutCache = useMemo(() => new Map<string, Map<string, { width: number; left: number; group: number }>>(), [appointments]);
+
+  const calculateEventLayout = React.useCallback((appointments: Appointment[], targetDate: Date) => {
+    const dateKey = format(targetDate, 'yyyy-MM-dd');
+    
+    // Check cache first to avoid expensive recalculations
+    if (layoutCache.has(dateKey)) {
+      return layoutCache.get(dateKey)!;
+    }
+
+    const dayAppointments = appointments.filter(apt => {
+      if (!apt.scheduled_date) return false;
+      const aptDate = new Date(apt.scheduled_date);
+      return isSameDay(aptDate, targetDate);
+    });
+
+    // Early return for single or no appointments
+    if (dayAppointments.length <= 1) {
+      const layoutMap = new Map<string, { width: number; left: number; group: number }>();
+      if (dayAppointments.length === 1) {
+        layoutMap.set(dayAppointments[0].id.toString(), { width: 100, left: 0, group: 0 });
+      }
+      layoutCache.set(dateKey, layoutMap);
+      return layoutMap;
+    }
+
+    // Create collision groups - events that overlap with each other
+    const collisionGroups: Appointment[][] = [];
+    const processedEvents = new Set<string>();
+
+    dayAppointments.forEach(appointment => {
+      if (processedEvents.has(appointment.id.toString())) return;
+
+      const collisionGroup = [appointment];
+      processedEvents.add(appointment.id.toString());
+
+      // Find all events that overlap with this event
+      let foundNewOverlaps = true;
+      while (foundNewOverlaps) {
+        foundNewOverlaps = false;
+        
+        dayAppointments.forEach(otherAppointment => {
+          if (processedEvents.has(otherAppointment.id.toString())) return;
+          
+          // Check if this event overlaps with ANY event in the current group
+          const overlapsWithGroup = collisionGroup.some(groupEvent => 
+            checkEventsOverlap(groupEvent, otherAppointment)
+          );
+
+          if (overlapsWithGroup) {
+            collisionGroup.push(otherAppointment);
+            processedEvents.add(otherAppointment.id.toString());
+            foundNewOverlaps = true;
+          }
+        });
+      }
+
+      if (collisionGroup.length > 0) {
+        collisionGroups.push(collisionGroup);
+      }
+    });
+
+    // Calculate layout for each event based on collision groups
+    const layoutMap = new Map<string, { width: number; left: number; group: number }>();
+
+    collisionGroups.forEach((group, groupIndex) => {
+      const groupSize = group.length;
+      
+      if (groupSize === 1) {
+        // No collision, use full width
+        layoutMap.set(group[0].id.toString(), {
+          width: 100,
+          left: 0,
+          group: groupIndex
+        });
+      } else {
+        // Multiple events, distribute horizontally
+        const eventWidth = (100 / groupSize) - 0.5; // Small gap between events
+        
+        // Sort events by start time for consistent ordering
+        const sortedGroup = [...group].sort((a, b) => {
+          const timeA = new Date(a.scheduled_date!).getTime();
+          const timeB = new Date(b.scheduled_date!).getTime();
+          return timeA - timeB;
+        });
+        
+        sortedGroup.forEach((appointment, index) => {
+          const leftPosition = (index * (100 / groupSize)) + 0.25; // Small margin
+          layoutMap.set(appointment.id.toString(), {
+            width: eventWidth,
+            left: leftPosition,
+            group: groupIndex
+          });
+        });
+      }
+    });
+
+    // Cache the result for future use
+    layoutCache.set(dateKey, layoutMap);
+    return layoutMap;
+  }, [checkEventsOverlap, layoutCache]);
 
   // Check if appointment spans multiple hours
   const getAppointmentEndHour = (appointment: Appointment): number => {
@@ -907,34 +1162,83 @@ export function Consultas() {
 
   const getCalendarDays = () => {
     if (calendarView === 'week') {
-      const start = startOfWeek(currentDate, { weekStartsOn: 0 });
-      const end = endOfWeek(currentDate, { weekStartsOn: 0 });
+      const start = startOfWeek(currentDate, { weekStartsOn: 1 });
+      const end = endOfWeek(currentDate, { weekStartsOn: 1 });
       return eachDayOfInterval({ start, end });
     } else if (calendarView === 'day') {
       return [currentDate];
     } else {
       // Month view
-      const start = startOfWeek(startOfMonth(currentDate));
-      const end = endOfWeek(endOfMonth(currentDate));
+      const start = startOfWeek(startOfMonth(currentDate), { weekStartsOn: 1 });
+      const end = endOfWeek(endOfMonth(currentDate), { weekStartsOn: 1 });
       return eachDayOfInterval({ start, end });
     }
   };
 
-  const getAppointmentsForDate = (date: Date) => {
-    return appointments.filter((appointment: Appointment) => {
-      if (!appointment.scheduled_date) return false;
+  // Memoized appointment filtering with date-based caching for performance optimization
+  const appointmentsByDate = useMemo(() => {
+    const dateMap = new Map<string, Appointment[]>();
+    
+    appointments.forEach((appointment: Appointment) => {
+      if (!appointment.scheduled_date) return;
+      
       const appointmentDate = new Date(appointment.scheduled_date);
-      return isSameDay(appointmentDate, date);
+      const dateKey = format(appointmentDate, 'yyyy-MM-dd');
+      
+      if (!dateMap.has(dateKey)) {
+        dateMap.set(dateKey, []);
+      }
+      dateMap.get(dateKey)!.push(appointment);
+    });
+    
+    return dateMap;
+  }, [appointments]);
+
+  const getAppointmentsForDate = React.useCallback((date: Date) => {
+    const dateKey = format(date, 'yyyy-MM-dd');
+    const dayAppointments = appointmentsByDate.get(dateKey) || [];
+    
+    // If no professionals are selected, show all appointments
+    if (selectedProfessionals.length === 0) return dayAppointments;
+    
+    return dayAppointments.filter((appointment: Appointment) => {
+      // For Google Calendar events, all belong to current user
+      if (appointment.google_calendar_event_id) {
+        if (currentUserEmail) {
+          const clinicUser = clinicUserByEmail.get(currentUserEmail);
+          
+          if (clinicUser && clinicUser.is_professional) {
+            return selectedProfessionals.includes(clinicUser.id);
+          }
+        }
+        return false;
+      }
+      
+      // For regular appointments, use doctor_name matching
+      const professionalId = getProfessionalIdByName(appointment.doctor_name);
+      return professionalId ? selectedProfessionals.includes(professionalId) : false;
+    });
+  }, [appointmentsByDate, selectedProfessionals, currentUserEmail, clinicUserByEmail, getProfessionalIdByName]);
+
+  // Function to toggle professional selection
+  const toggleProfessional = (professionalId: number) => {
+    setSelectedProfessionals(prev => {
+      if (prev.includes(professionalId)) {
+        return prev.filter(id => id !== professionalId);
+      } else {
+        return [...prev, professionalId];
+      }
     });
   };
 
-  const showDayEvents = (date: Date, events: Appointment[]) => {
+  // Memoized showDayEvents function to reduce re-renders and improve performance
+  const showDayEvents = React.useCallback((date: Date, events: Appointment[]) => {
     setDayEventsDialog({
       open: true,
       date,
       events
     });
-  };
+  }, []);
 
   if (isLoading) {
     return (
@@ -992,24 +1296,6 @@ export function Consultas() {
 
           <Form {...form}>
             <form onSubmit={form.handleSubmit((data) => createAppointmentMutation.mutate(data))} className="space-y-4">
-              {/* Appointment Name */}
-              <FormField
-                control={form.control}
-                name="appointment_name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Nome do Compromisso *</FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder="Ex: Consulta Dr. Silva, Retorno Cardiologia..."
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
               {/* Contact Selection with Cadastrar button inline */}
               <FormField
                 control={form.control}
@@ -1085,8 +1371,6 @@ export function Consultas() {
                                       value={contact.name}
                                       onSelect={() => {
                                         field.onChange(contact.id.toString());
-                                        form.setValue("contact_whatsapp", contact.phone || "");
-                                        form.setValue("contact_email", contact.email || "");
                                         setContactComboboxOpen(false);
                                         setPatientSearchQuery("");
                                       }}
@@ -1142,11 +1426,13 @@ export function Consultas() {
                             <SelectValue placeholder="Selecione o profissional" />
                           </SelectTrigger>
                           <SelectContent>
-                            {clinicUsers.map((user: any) => (
-                              <SelectItem key={user.user_id} value={user.user_id.toString()}>
-                                {user.name}
-                              </SelectItem>
-                            ))}
+                            {clinicUsers
+                              .filter((user: any) => user.is_professional === true)
+                              .map((user: any) => (
+                                <SelectItem key={user.id || user.user_id} value={(user.id || user.user_id)?.toString()}>
+                                  {user.name}
+                                </SelectItem>
+                              ))}
                           </SelectContent>
                         </Select>
                       </FormControl>
@@ -1276,16 +1562,20 @@ export function Consultas() {
               </div>
 
               {/* Smart Availability Status - Combined availability + context */}
-              {availabilityConflict && (
+              {(availabilityConflict || isCheckingAvailability) && (
                 <div className={`p-3 rounded-lg border ${
-                  availabilityConflict.hasConflict
-                    ? "bg-red-50 border-red-200 text-red-800"
-                    : workingHoursWarning && workingHoursWarning.hasWarning
-                      ? "bg-orange-50 border-orange-200 text-orange-800"
-                      : "bg-green-50 border-green-200 text-green-800"
+                  isCheckingAvailability
+                    ? "bg-blue-50 border-blue-200 text-blue-800"
+                    : availabilityConflict?.hasConflict
+                      ? "bg-red-50 border-red-200 text-red-800"
+                      : workingHoursWarning && workingHoursWarning.hasWarning
+                        ? "bg-orange-50 border-orange-200 text-orange-800"
+                        : "bg-green-50 border-green-200 text-green-800"
                 }`}>
                   <div className="flex items-start gap-3">
-                    {availabilityConflict.hasConflict ? (
+                    {isCheckingAvailability ? (
+                      <div className="w-4 h-4 mt-0.5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                    ) : availabilityConflict?.hasConflict ? (
                       <Clock className="h-4 w-4 mt-0.5 flex-shrink-0" />
                     ) : workingHoursWarning && workingHoursWarning.hasWarning ? (
                       <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
@@ -1294,7 +1584,9 @@ export function Consultas() {
                     )}
                     <div className="flex-1">
                       <div className="text-sm font-medium">
-                        {availabilityConflict.hasConflict ? (
+                        {isCheckingAvailability ? (
+                          'Verificando disponibilidade...'
+                        ) : availabilityConflict?.hasConflict ? (
                           availabilityConflict.message
                         ) : workingHoursWarning && workingHoursWarning.hasWarning ? (
                           <>Horário livre, mas {workingHoursWarning.message.toLowerCase()}</>
@@ -1302,7 +1594,7 @@ export function Consultas() {
                           'Horário disponível'
                         )}
                       </div>
-                      {!availabilityConflict.hasConflict && workingHoursWarning && workingHoursWarning.hasWarning && workingHoursWarning.details && (
+                      {!isCheckingAvailability && !availabilityConflict?.hasConflict && workingHoursWarning && workingHoursWarning.hasWarning && workingHoursWarning.details && (
                         <div className="text-xs text-orange-700 mt-1">
                           {workingHoursWarning.details}
                         </div>
@@ -1314,43 +1606,15 @@ export function Consultas() {
 
 
 
-              {/* Contact Information */}
-              <div className="grid grid-cols-2 gap-4">
-                <FormField
-                  control={form.control}
-                  name="contact_whatsapp"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>WhatsApp</FormLabel>
-                      <FormControl>
-                        <Input
-                          placeholder="(11) 99999-9999"
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <FormField
-                  control={form.control}
-                  name="contact_email"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>E-mail</FormLabel>
-                      <FormControl>
-                        <Input
-                          type="email"
-                          placeholder="paciente@email.com"
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              </div>
+              {/* Tag Selector */}
+              <AppointmentTagSelector
+                clinicId={1}
+                selectedTagId={selectedTagId}
+                onTagSelect={(tagId) => {
+                  setSelectedTagId(tagId);
+                  form.setValue("tag_id", tagId || undefined);
+                }}
+              />
 
               {/* Notes */}
               <FormField
@@ -1394,24 +1658,79 @@ export function Consultas() {
       <div className="bg-white rounded-lg shadow-sm border">
         {/* View Mode Toggle */}
         <div className="p-4 border-b border-slate-200 flex justify-between items-center">
-          <div className="flex space-x-1 bg-slate-100 rounded-lg p-1">
-            <Button
-              variant={viewMode === "list" ? "default" : "outline"}
-              onClick={() => setViewMode("list")}
-              className="flex items-center gap-2"
-            >
-              <List className="w-4 h-4" />
-              Lista
-            </Button>
-            <Button
-              variant={viewMode === "calendar" ? "default" : "outline"}
-              onClick={() => setViewMode("calendar")}
-              className="flex items-center gap-2"
-            >
-              <CalendarDays className="w-4 h-4" />
-              Calendário
-            </Button>
-          </div>
+          <TooltipProvider>
+            <div className="flex space-x-1 bg-slate-100 rounded-lg p-1">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant={viewMode === "list" ? "default" : "outline"}
+                    onClick={() => setViewMode("list")}
+                    className="flex items-center justify-center w-10 h-10 p-0"
+                  >
+                    <List className="w-4 h-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>Lista</p>
+                </TooltipContent>
+              </Tooltip>
+              
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant={viewMode === "calendar" ? "default" : "outline"}
+                    onClick={() => setViewMode("calendar")}
+                    className="flex items-center justify-center w-10 h-10 p-0"
+                  >
+                    <Calendar className="w-4 h-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>Calendário</p>
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          </TooltipProvider>
+
+          {/* Professional Filter Buttons - positioned between Lista/Calendário and Dia/Semana/Mês */}
+          {viewMode === "calendar" && (
+            <div className="flex items-center space-x-3">
+              <div className="flex items-center space-x-2">
+                <span className="text-sm font-medium text-slate-600">Profissionais:</span>
+
+                {/* Professional Filter Avatars */}
+                {clinicUsers
+                  .filter((user: any) => user.is_professional === true)
+                  .map((professional: any) => {
+                    const isSelected = selectedProfessionals.includes(professional.id);
+                    const initials = professional.name
+                      .split(' ')
+                      .map((n: string) => n[0])
+                      .join('')
+                      .substring(0, 2)
+                      .toUpperCase();
+                    
+                    return (
+                      <button
+                        key={professional.id}
+                        onClick={() => toggleProfessional(professional.id)}
+                        title={professional.name}
+                        className={`
+                          w-9 h-9 rounded-full flex items-center justify-center text-xs font-medium
+                          transition-all duration-200 hover:scale-105
+                          ${isSelected 
+                            ? 'bg-blue-500 text-white border-2 border-blue-600 shadow-md' 
+                            : 'bg-slate-200 text-slate-600 border-2 border-transparent hover:bg-slate-300'
+                          }
+                        `}
+                      >
+                        {initials}
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+          )}
 
           {viewMode === "calendar" && (
             <div className="flex items-center space-x-4">
@@ -1473,13 +1792,27 @@ export function Consultas() {
           {viewMode === "list" ? (
             /* List View */
             <div className="space-y-4">
-              {appointments.filter((app: Appointment) => !app.google_calendar_event_id).length === 0 ? (
+              {appointments.filter((app: Appointment) => {
+                if (app.google_calendar_event_id) return false;
+                
+                // Apply professional filter
+                if (selectedProfessionals.length === 0) return true;
+                const professionalId = getProfessionalIdByName(app.doctor_name);
+                return professionalId ? selectedProfessionals.includes(professionalId) : false;
+              }).length === 0 ? (
                 <div className="text-center py-8 text-slate-500">
                   Nenhuma consulta encontrada
                 </div>
               ) : (
                 appointments
-                  .filter((app: Appointment) => !app.google_calendar_event_id)
+                  .filter((app: Appointment) => {
+                    if (app.google_calendar_event_id) return false;
+                    
+                    // Apply professional filter
+                    if (selectedProfessionals.length === 0) return true;
+                    const professionalId = getProfessionalIdByName(app.doctor_name);
+                    return professionalId ? selectedProfessionals.includes(professionalId) : false;
+                  })
                   .sort((a: Appointment, b: Appointment) => {
                     return new Date(a.scheduled_date || 0).getTime() - new Date(b.scheduled_date || 0).getTime();
                   })
@@ -1594,7 +1927,7 @@ export function Consultas() {
               {calendarView === "month" && (
                 <div className="grid grid-cols-7 gap-px bg-slate-200 rounded-lg overflow-hidden">
                   {/* Calendar headers */}
-                  {['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map((day) => (
+                  {['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'].map((day) => (
                     <div key={day} className="bg-slate-50 p-2 text-center text-sm font-medium text-slate-600">
                       {day}
                     </div>
@@ -1670,48 +2003,38 @@ export function Consultas() {
                     ))}
                   </div>
                   
-                  {/* Time slots grid */}
-                  <div className="grid grid-cols-8 gap-px">
-                    {Array.from({ length: 15 }, (_, i) => i + 7).map((hour) => (
-                      <div key={hour} className="contents">
-                        {/* Time label with improved formatting */}
-                        <div className="bg-white p-2 text-sm text-slate-600 border-r flex items-start justify-center relative" style={{ height: `${PIXELS_PER_HOUR}px` }}>
-                          <span className="font-medium">{hour.toString().padStart(2, '0')}h</span>
-                          
-                          {/* 15-minute grid lines */}
-                          <div className="absolute inset-x-0 top-0 h-full">
-                            {[1, 2, 3].map((quarter) => (
-                              <div 
-                                key={quarter}
-                                className="absolute left-0 right-0 border-t border-slate-100"
-                                style={{ top: `${quarter * PIXELS_PER_QUARTER}px` }}
-                              />
-                            ))}
+                  {/* Calendar body with absolute positioned appointments */}
+                  <div className="relative">
+                    {/* Background grid without appointments */}
+                    <div className="grid grid-cols-8 gap-px">
+                      {Array.from({ length: 15 }, (_, i) => i + 7).map((hour) => (
+                        <div key={hour} className="contents">
+                          {/* Time label */}
+                          <div className="bg-white p-2 text-sm text-slate-600 border-r flex items-start justify-center relative" style={{ height: `${PIXELS_PER_HOUR}px` }}>
+                            <span className="font-medium">{hour.toString().padStart(2, '0')}h</span>
+                            
+                            {/* 15-minute grid lines */}
+                            <div className="absolute inset-x-0 top-0 h-full">
+                              {[1, 2, 3].map((quarter) => (
+                                <div 
+                                  key={quarter}
+                                  className="absolute left-0 right-0 border-t border-slate-100"
+                                  style={{ top: `${quarter * PIXELS_PER_QUARTER}px` }}
+                                />
+                              ))}
+                            </div>
                           </div>
-                        </div>
-                        
-                        {/* Day columns */}
-                        {calendarDays.slice(0, 7).map((day) => {
-                          const allDayAppointments = getAppointmentsForDate(day);
                           
-                          // Get appointments that start in this hour slot
-                          const slotAppointments = allDayAppointments.filter((apt: Appointment) => {
-                            if (!apt.scheduled_date) return false;
-                            const aptStartHour = new Date(apt.scheduled_date).getHours();
-                            return aptStartHour === hour;
-                          });
-                          
-                          return (
+                          {/* Day columns with only clickable slots */}
+                          {calendarDays.slice(0, 7).map((day, dayIndex) => (
                             <div 
                               key={`${day.toISOString()}-${hour}`} 
-                              className={`${getCalendarCellBackgroundClass(day, hour)} border-r relative overflow-hidden`}
+                              className={`${getCalendarCellBackgroundClass(day, hour)} border-r relative`}
                               style={{ height: `${PIXELS_PER_HOUR}px` }}
                             >
                               {/* 15-minute clickable slots */}
                               {[0, 15, 30, 45].map((minute) => {
                                 const isSlotAvailable = isTimeSlotAvailable(day, hour, minute);
-                                const slotDateTime = new Date(day);
-                                slotDateTime.setHours(hour, minute, 0, 0);
                                 const timeLabel = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
                                 
                                 return (
@@ -1734,7 +2057,7 @@ export function Consultas() {
                                     {/* Time indicator on hover */}
                                     {isSlotAvailable && (
                                       <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-center justify-center">
-                                        <div className="bg-blue-100 border border-blue-300 rounded px-1 py-0.5 text-xs font-medium text-blue-800">
+                                        <div className="bg-blue-100 border border-blue-300 rounded px-2 py-1 text-xs font-medium text-blue-800">
                                           {timeLabel}
                                         </div>
                                       </div>
@@ -1750,41 +2073,77 @@ export function Consultas() {
                               {hour === 12 && clinicConfig?.has_lunch_break && (
                                 <div className="absolute inset-0 bg-slate-50 opacity-30 pointer-events-none" />
                               )}
-                              
-                              {slotAppointments.map((appointment: Appointment) => {
-                                const colors = getEventColor(appointment.status, !!appointment.google_calendar_event_id);
-                                const patientName = getPatientName(appointment.contact_id, appointment);
-                                const time = appointment.scheduled_date ? format(new Date(appointment.scheduled_date), 'HH:mm') : '';
-                                const duration = getAppointmentDuration(appointment);
-                                const height = getAppointmentHeight(duration);
-                                const topPosition = getAppointmentTopPosition(appointment.scheduled_date);
-
-                                return (
-                                  <EventTooltip key={appointment.id} appointment={appointment} patientName={patientName}>
-                                    <div
-                                      className={`absolute left-1 right-1 text-xs p-1 ${colors.bg} ${colors.text} rounded cursor-pointer ${colors.border} border hover:opacity-90 transition-colors overflow-hidden`}
-                                      style={{ 
-                                        top: `${topPosition}px`,
-                                        height: `${height}px`,
-                                        zIndex: 10
-                                      }}
-                                      onClick={() => handleAppointmentClick(appointment)}
-                                    >
-                                      <div className="flex items-start gap-1 h-full">
-                                        <div className={`w-2 h-2 ${colors.dot} rounded-full flex-shrink-0 mt-0.5`}></div>
-                                        <div className="flex-1 overflow-hidden">
-                                          <div className="truncate">{patientName}</div>
-                                        </div>
-                                      </div>
-                                    </div>
-                                  </EventTooltip>
-                                );
-                              })}
                             </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Absolutely positioned appointments overlay */}
+                    <div className="absolute inset-0 pointer-events-none">
+                      {calendarDays.slice(0, 7).map((day, dayIndex) => {
+                        const dayAppointments = getAppointmentsForDate(day);
+                        const layoutMap = calculateEventLayout(appointments, day);
+                        
+                        return dayAppointments.map((appointment: Appointment) => {
+                          if (!appointment.scheduled_date) return null;
+                          
+                          const colors = getEventColor(appointment.status, !!appointment.google_calendar_event_id);
+                          const patientName = getPatientName(appointment.contact_id, appointment);
+                          const time = appointment.scheduled_date ? format(new Date(appointment.scheduled_date), 'HH:mm') : '';
+                          const duration = getAppointmentDuration(appointment);
+                          
+                          const aptStart = new Date(appointment.scheduled_date);
+                          const startHour = aptStart.getHours();
+                          const startMinutes = aptStart.getMinutes();
+                          
+                          // Calculate position from the start of the calendar (7 AM)
+                          const hourOffset = startHour - 7;
+                          const totalMinutesFromStart = (hourOffset * 60) + startMinutes;
+                          const topPosition = totalMinutesFromStart * PIXELS_PER_MINUTE;
+                          const height = duration * PIXELS_PER_MINUTE;
+                          
+                          // Get collision layout information
+                          const layout = layoutMap.get(appointment.id.toString()) || { width: 100, left: 0, group: 0 };
+                          
+                          // Calculate left position based on day column and collision layout
+                          const timeColumnWidth = 12.5; // 1/8 = 12.5% for time column
+                          const dayColumnWidth = 12.5; // 1/8 = 12.5% for each day column
+                          const baseDayPosition = timeColumnWidth + (dayIndex * dayColumnWidth);
+                          
+                          // Apply collision layout within the day column
+                          const eventWidth = (dayColumnWidth * layout.width) / 100;
+                          const eventLeftOffset = (dayColumnWidth * layout.left) / 100;
+                          const finalLeftPosition = baseDayPosition + eventLeftOffset;
+                          
+                          return (
+                            <EventTooltip key={appointment.id} appointment={appointment} patientName={patientName}>
+                              <div
+                                className={`absolute text-sm p-2 ${colors.bg} ${colors.text} rounded cursor-pointer ${colors.border} border hover:opacity-90 transition-colors overflow-hidden shadow-sm pointer-events-auto`}
+                                style={{ 
+                                  top: `${topPosition}px`,
+                                  left: `calc(${finalLeftPosition}% + 2px)`,
+                                  width: `calc(${eventWidth}% - 4px)`,
+                                  height: `${height}px`,
+                                  zIndex: 10 + layout.group
+                                }}
+                                onClick={() => handleAppointmentClick(appointment)}
+                              >
+                                <div className="flex items-start gap-1.5 h-full">
+                                  <div className={`w-2 h-2 ${colors.dot} rounded-full flex-shrink-0 mt-1`}></div>
+                                  <div className="flex-1 overflow-hidden">
+                                    <div className="text-xs truncate">{patientName}</div>
+                                    <div className="text-xs opacity-80 mt-1">
+                                      {duration}min
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </EventTooltip>
                           );
-                        })}
-                      </div>
-                    ))}
+                        });
+                      })}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1876,52 +2235,68 @@ export function Consultas() {
                             </div>
                           ))}
                           
-                          {/* Appointments positioned absolutely */}
-                          {getAppointmentsForDate(currentDate).map((appointment: Appointment) => {
-                            if (!appointment.scheduled_date) return null;
+                          {/* Appointments positioned absolutely with collision detection */}
+                          {(() => {
+                            const dayAppointments = getAppointmentsForDate(currentDate);
+                            const layoutMap = calculateEventLayout(appointments, currentDate);
                             
-                            const colors = getEventColor(appointment.status, !!appointment.google_calendar_event_id);
-                            const patientName = getPatientName(appointment.contact_id, appointment);
-                            const time = appointment.scheduled_date ? format(new Date(appointment.scheduled_date), 'HH:mm') : '';
-                            const duration = getAppointmentDuration(appointment);
-                            const height = getAppointmentHeight(duration);
-                            
-                            const startDate = new Date(appointment.scheduled_date);
-                            const startHour = startDate.getHours();
-                            const startMinutes = startDate.getMinutes();
-                            
-                            // Calculate position from 8 AM start
-                            const hourOffset = startHour - 8;
-                            const totalMinutesFromStart = (hourOffset * 60) + startMinutes;
-                            const topPosition = totalMinutesFromStart * PIXELS_PER_MINUTE;
+                            return dayAppointments.map((appointment: Appointment) => {
+                              if (!appointment.scheduled_date) return null;
+                              
+                              const colors = getEventColor(appointment.status, !!appointment.google_calendar_event_id);
+                              const patientName = getPatientName(appointment.contact_id, appointment);
+                              const time = appointment.scheduled_date ? format(new Date(appointment.scheduled_date), 'HH:mm') : '';
+                              const duration = getAppointmentDuration(appointment);
+                              const height = getAppointmentHeight(duration);
+                              
+                              const startDate = new Date(appointment.scheduled_date);
+                              const startHour = startDate.getHours();
+                              const startMinutes = startDate.getMinutes();
+                              
+                              // Calculate position from 8 AM start
+                              const hourOffset = startHour - 8;
+                              const totalMinutesFromStart = (hourOffset * 60) + startMinutes;
+                              const topPosition = totalMinutesFromStart * PIXELS_PER_MINUTE;
 
-                            return (
-                              <EventTooltip key={appointment.id} appointment={appointment} patientName={patientName}>
-                                <div
-                                  className={`absolute left-2 right-2 text-sm p-3 ${colors.bg} ${colors.text} rounded cursor-pointer ${colors.border} border hover:opacity-90 transition-colors overflow-hidden shadow-sm`}
-                                  style={{ 
-                                    top: `${topPosition}px`,
-                                    height: `${height}px`,
-                                    zIndex: 10
-                                  }}
-                                  onClick={() => handleAppointmentClick(appointment)}
-                                >
-                                  <div className="flex items-start gap-2 h-full">
-                                    <div className={`w-3 h-3 ${colors.dot} rounded-full flex-shrink-0 mt-1`}></div>
-                                    <div className="flex-1 overflow-hidden">
-                                      <div className="font-semibold truncate">{patientName}</div>
-                                      {appointment.doctor_name && !appointment.google_calendar_event_id && (
-                                        <div className="text-xs mt-1 opacity-90">Dr. {appointment.doctor_name}</div>
-                                      )}
-                                      {appointment.appointment_type && (
-                                        <div className="text-xs mt-1 opacity-90 truncate">{appointment.appointment_type}</div>
-                                      )}
+                              // Get collision layout information
+                              const layout = layoutMap.get(appointment.id.toString()) || { width: 100, left: 0, group: 0 };
+                              
+                              // Calculate horizontal positioning based on collision detection
+                              const containerPadding = 8; // left-2 = 8px
+                              const availableWidth = `calc(100% - ${containerPadding * 2}px)`;
+                              const eventWidth = `calc(${availableWidth} * ${layout.width / 100})`;
+                              const leftOffset = `calc(${containerPadding}px + ${availableWidth} * ${layout.left / 100})`;
+
+                              return (
+                                <EventTooltip key={appointment.id} appointment={appointment} patientName={patientName}>
+                                  <div
+                                    className={`absolute text-sm p-3 ${colors.bg} ${colors.text} rounded cursor-pointer ${colors.border} border hover:opacity-90 transition-colors overflow-hidden shadow-sm`}
+                                    style={{ 
+                                      top: `${topPosition}px`,
+                                      left: leftOffset,
+                                      width: eventWidth,
+                                      height: `${height}px`,
+                                      zIndex: 10 + layout.group
+                                    }}
+                                    onClick={() => handleAppointmentClick(appointment)}
+                                  >
+                                    <div className="flex items-start gap-1.5 h-full">
+                                      <div className={`w-2 h-2 ${colors.dot} rounded-full flex-shrink-0 mt-1`}></div>
+                                      <div className="flex-1 overflow-hidden">
+                                        <div className="text-xs truncate">{patientName}</div>
+                                        {appointment.doctor_name && !appointment.google_calendar_event_id && (
+                                          <div className="text-xs mt-1 opacity-90">Dr. {appointment.doctor_name}</div>
+                                        )}
+                                        {appointment.appointment_type && (
+                                          <div className="text-xs mt-1 opacity-90 truncate">{appointment.appointment_type}</div>
+                                        )}
+                                      </div>
                                     </div>
                                   </div>
-                                </div>
-                              </EventTooltip>
-                            );
-                          })}
+                                </EventTooltip>
+                              );
+                            });
+                          })()}
                         </div>
                       </div>
                     </div>
@@ -2165,6 +2540,7 @@ export function Consultas() {
           <FindTimeSlots
             selectedDate={watchedDate || ''}
             duration={parseInt(watchedDuration) || 30}
+            professionalName={getProfessionalNameById(watchedProfessionalId)}
             onTimeSelect={(time, date) => {
               form.setValue("scheduled_time", time);
               form.setValue("scheduled_date", date);
